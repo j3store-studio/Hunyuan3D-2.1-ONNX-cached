@@ -1,0 +1,13 @@
+{
+  "title": "Hunyuan3D-2.1 Image-to-3D",
+  "description": "Generate high-fidelity 3D models with PBR materials from input images using Tencent Hunyuan3D-2.1",
+  "type": "serverless",
+  "category": "3d",
+  "config": {
+    "runpod": "GPU",
+    "containerDiskInGb": 50
+  },
+  "presets": [
+    {"name": "default", "scale": "RTX_A6000"}
+  ]
+}
