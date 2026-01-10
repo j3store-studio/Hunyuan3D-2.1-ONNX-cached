@@ -1,55 +1,21 @@
 """
-Mesh utilities for Hunyuan3D - NO BLENDER VERSION
+Mesh utilities for Hunyuan3D - Subprocess bpy wrapper
 
-Replaces bpy-dependent mesh_utils.py with trimesh-based implementation.
-This allows running on Python 3.12 where bpy is not available.
+Calls bpy operations via subprocess using a separate Python 3.10 environment
+since bpy doesn't support Python 3.12.
+
+The actual bpy operations are in /app/bpy_mesh_ops.py which runs in /opt/bpy-env/
 """
 
 import os
-import numpy as np
+import subprocess
+import tempfile
 import trimesh
-from typing import Optional, Tuple, Dict, Any
+from typing import Optional
 
-
-def merge_vertices(mesh: trimesh.Trimesh, merge_threshold: float = 1e-6) -> trimesh.Trimesh:
-    """Merge duplicate vertices within threshold distance."""
-    mesh.merge_vertices(merge_tex=True, merge_norm=True)
-    return mesh
-
-
-def apply_smooth_shading(mesh: trimesh.Trimesh) -> trimesh.Trimesh:
-    """Apply smooth shading by computing vertex normals."""
-    # Trimesh automatically computes smooth vertex normals
-    mesh.fix_normals()
-    return mesh
-
-
-def apply_flat_shading(mesh: trimesh.Trimesh) -> trimesh.Trimesh:
-    """Apply flat shading - each face gets its own normals."""
-    # Unmerge vertices so each face has unique vertices
-    mesh = mesh.copy()
-    # This effectively gives flat shading
-    return mesh
-
-
-def apply_auto_smooth(mesh: trimesh.Trimesh, angle: float = 30.0) -> trimesh.Trimesh:
-    """
-    Apply auto-smooth shading based on angle threshold.
-    
-    Edges with angles greater than threshold get sharp normals,
-    others get smooth interpolated normals.
-    
-    Args:
-        mesh: Input trimesh
-        angle: Angle threshold in degrees (default 30)
-    
-    Returns:
-        Mesh with adjusted normals
-    """
-    # Trimesh handles this reasonably well with face_normals
-    # For more precise control, we'd need custom normal calculation
-    mesh.fix_normals()
-    return mesh
+# Path to the bpy environment and wrapper script
+BPY_PYTHON = "/opt/bpy-env/bin/python"
+BPY_SCRIPT = "/app/bpy_mesh_ops.py"
 
 
 def convert_obj_to_glb(
@@ -60,7 +26,7 @@ def convert_obj_to_glb(
     auto_smooth_angle: float = 30.0
 ) -> str:
     """
-    Convert OBJ file to GLB format.
+    Convert OBJ file to GLB format using Blender via subprocess.
     
     Args:
         input_path: Path to input OBJ file
@@ -72,35 +38,39 @@ def convert_obj_to_glb(
     Returns:
         Path to output GLB file
     """
-    # Load the mesh
-    mesh = trimesh.load(input_path, force='mesh')
+    # Build command
+    cmd = [
+        BPY_PYTHON,
+        BPY_SCRIPT,
+        "convert_obj_to_glb",
+        input_path,
+        output_path,
+        f"--shading={shading_mode}",
+        f"--angle={auto_smooth_angle}"
+    ]
     
-    # Handle scene with multiple meshes
-    if isinstance(mesh, trimesh.Scene):
-        # Combine all meshes into one
-        meshes = []
-        for name, geom in mesh.geometry.items():
-            if isinstance(geom, trimesh.Trimesh):
-                meshes.append(geom)
-        if meshes:
-            mesh = trimesh.util.concatenate(meshes)
-        else:
-            raise ValueError("No valid meshes found in input file")
-    
-    # Merge vertices if requested
     if apply_vertex_merge:
-        mesh = merge_vertices(mesh)
+        cmd.append("--merge-verts")
+    else:
+        cmd.append("--no-merge-verts")
     
-    # Apply shading
-    if shading_mode == "smooth":
-        mesh = apply_smooth_shading(mesh)
-    elif shading_mode == "flat":
-        mesh = apply_flat_shading(mesh)
-    elif shading_mode == "auto":
-        mesh = apply_auto_smooth(mesh, auto_smooth_angle)
+    # Run bpy in subprocess
+    print(f"Running bpy mesh conversion: {' '.join(cmd)}")
+    result = subprocess.run(
+        cmd,
+        capture_output=True,
+        text=True,
+        timeout=300  # 5 minute timeout
+    )
     
-    # Export to GLB
-    mesh.export(output_path, file_type='glb')
+    if result.returncode != 0:
+        print(f"bpy stderr: {result.stderr}")
+        raise RuntimeError(f"bpy mesh conversion failed: {result.stderr}")
+    
+    print(f"bpy stdout: {result.stdout}")
+    
+    if not os.path.exists(output_path):
+        raise RuntimeError(f"Output file not created: {output_path}")
     
     return output_path
 
@@ -121,3 +91,14 @@ def save_mesh(mesh: trimesh.Trimesh, filepath: str, file_type: str = None) -> st
         file_type = os.path.splitext(filepath)[1][1:].lower()
     mesh.export(filepath, file_type=file_type)
     return filepath
+
+
+# Fallback functions if bpy subprocess fails (uses trimesh)
+def convert_obj_to_glb_fallback(input_path: str, output_path: str) -> str:
+    """Fallback GLB conversion using trimesh (no Blender features)."""
+    print("Warning: Using trimesh fallback for GLB conversion")
+    mesh = load_mesh(input_path)
+    mesh.merge_vertices()
+    mesh.fix_normals()
+    mesh.export(output_path, file_type='glb')
+    return output_path
