@@ -84,22 +84,13 @@ RUN test -d /app/hy3dpaint || (echo "ERROR: hy3dpaint not found" && exit 1)
 RUN test -f /app/requirements.txt || (echo "ERROR: requirements.txt not found" && exit 1)
 
 # =============================================================================
-# STAGE 4a: Install bpy (Blender Python module) via pip
+# STAGE 4a: System dependencies for mesh processing (NO BLENDER)
 # =============================================================================
-# Install system dependencies required by bpy
+# bpy (Blender Python) doesn't support Python 3.12, so we use trimesh instead
 RUN apt-get update && apt-get install -y --no-install-recommends \
     libxi6 libxxf86vm1 libxfixes3 libxrender1 libgl1 \
-    libxkbcommon0 libsm6 libice6 libxrandr2 libxcursor1 \
-    libxinerama1 libglew2.2 libwayland-client0 libwayland-cursor0 \
-    libwayland-egl1 libxkbcommon0 libdbus-1-3 libpulse0 \
+    libxkbcommon0 libsm6 libice6 \
     && rm -rf /var/lib/apt/lists/*
-
-# Install bpy via pip (Blender as a Python module)
-# This provides bpy without needing standalone Blender installation
-RUN pip install --no-cache-dir bpy==4.0.0
-
-# VERIFY: bpy can be imported
-RUN python -c "import bpy; print(f'bpy {bpy.app.version_string}')" || echo "WARN: bpy import failed - mesh export may not work"
 
 # =============================================================================
 # STAGE 4b: Python dependencies (inference-optimized)
@@ -171,6 +162,10 @@ COPY handler.py /app/handler.py
 # FIX: Replace schedulers.py to fix numpy/torch compatibility issue
 # (torch.from_numpy fails with "expected np.ndarray got numpy.ndarray")
 COPY schedulers.py /app/hy3dshape/hy3dshape/schedulers.py
+
+# FIX: Replace mesh_utils.py with trimesh-based version (no bpy dependency)
+# bpy doesn't support Python 3.12, so we use trimesh instead
+COPY mesh_utils_noblender.py /app/hy3dpaint/DifferentiableRenderer/mesh_utils.py
 
 # VERIFY: Handler file exists and has correct syntax
 RUN python -m py_compile /app/handler.py && echo "handler.py: syntax OK"
