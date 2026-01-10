@@ -107,10 +107,13 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 # Create bpy virtual environment with Python 3.11
-# NOTE: bpy 4.2.0+ requires Python 3.11 (not 3.10)
+# NOTE: bpy wheels are hosted on Blender's index, not standard PyPI
+# bpy 4.x+ requires Python 3.11 (no 3.12 wheels exist)
 RUN python3.11 -m venv /opt/bpy-env && \
     /opt/bpy-env/bin/pip install --no-cache-dir --upgrade pip && \
-    /opt/bpy-env/bin/pip install --no-cache-dir "bpy>=4.2.0" numpy==1.24.3
+    /opt/bpy-env/bin/pip install --no-cache-dir \
+        --extra-index-url https://download.blender.org/pypi/ \
+        "bpy>=4.2.0" numpy==1.24.3
 
 # VERIFY: bpy works in the venv
 RUN /opt/bpy-env/bin/python -c "import bpy; print(f'bpy {bpy.app.version_string}')"
