@@ -1,5 +1,11 @@
 {
-  "tests": [],
+  "tests": [
+    {
+      "name": "health_check",
+      "input": {"health_check": true},
+      "timeout": 30000
+    }
+  ],
   "config": {
     "gpuTypeId": "NVIDIA RTX A6000",
     "gpuCount": 1,

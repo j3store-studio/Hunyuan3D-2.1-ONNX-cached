@@ -81,11 +81,11 @@ def find_cached_model(model_name: str) -> str | None:
 MODEL_DIR = find_cached_model("tencent/Hunyuan3D-2.1") or os.environ.get("MODEL_DIR", "/models/Hunyuan3D-2.1")
 print(f"Using model directory: {MODEL_DIR}")
 
-# Verify model directory exists (fail early if neither cache nor fallback exists)
+# Check if model directory exists
 if not os.path.exists(MODEL_DIR):
-    print(f"ERROR: Model directory does not exist: {MODEL_DIR}")
-    print("Make sure to set the Model field to 'tencent/Hunyuan3D-2.1' in RunPod console")
-    print("This enables RunPod's model caching feature.")
+    print(f"INFO: Model not found at: {MODEL_DIR}")
+    print("This is expected during build testing. Model will be loaded from RunPod cache at runtime.")
+    print("Ensure the Model field is set to 'tencent/Hunyuan3D-2.1' in RunPod console.")
 
 # Add Hunyuan3D paths
 sys.path.insert(0, '/app')
@@ -172,6 +172,17 @@ def handler(job: dict) -> dict:
     RunPod serverless handler for Hunyuan3D-2.1.
     """
     job_input = job.get("input")
+
+    # Health check - returns immediately without loading model
+    # Used by RunPod's testing phase during deployment
+    if job_input == "health_check" or (isinstance(job_input, dict) and job_input.get("health_check")):
+        return {
+            "status": "healthy",
+            "model_dir": MODEL_DIR,
+            "model_available": os.path.exists(MODEL_DIR),
+            "message": "Handler ready. Model will be loaded on first inference request."
+        }
+
     if not isinstance(job_input, dict):
         return {"error": "Invalid request: missing 'input' field"}
 
