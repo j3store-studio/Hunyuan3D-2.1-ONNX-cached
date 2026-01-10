@@ -92,11 +92,15 @@ RUN test -f /app/requirements.txt || (echo "ERROR: requirements.txt not found" &
 # =============================================================================
 # bpy 4.2.0+ requires Python 3.11+ (not 3.10, not 3.12)
 # We use Python 3.11 in a separate venv and call it via subprocess for mesh operations
+#
+# NOTE: We add deadsnakes PPA manually because add-apt-repository breaks after
+# changing the default Python to 3.12 (apt_pkg is only available for system Python)
 
-# Install Python 3.11 and system dependencies for bpy
+# Add deadsnakes PPA manually (avoids add-apt-repository which needs apt_pkg)
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    software-properties-common \
-    && add-apt-repository ppa:deadsnakes/ppa -y \
+    gnupg ca-certificates \
+    && echo "deb https://ppa.launchpadcontent.net/deadsnakes/ppa/ubuntu jammy main" > /etc/apt/sources.list.d/deadsnakes.list \
+    && apt-key adv --keyserver keyserver.ubuntu.com --recv-keys F23C5A6CF475977595C89F51BA6932366A755776 \
     && apt-get update \
     && apt-get install -y --no-install-recommends \
     python3.11 python3.11-venv python3.11-dev \
