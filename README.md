@@ -1,6 +1,19 @@
-# Hunyuan3D-2.1 RunPod Serverless Endpoint
+# Hunyuan3D-2.1-ONNX-cached
 
-Deploy Tencent's Hunyuan3D-2.1 as a RunPod serverless endpoint for image-to-3D generation with PBR textures.
+RunPod serverless endpoint for Hunyuan3D-2.1 image-to-3D generation with **model caching** for faster cold starts.
+
+## Cached Version
+
+This is the **cached version** of Hunyuan3D-2.1-ONNX. Key differences from the original:
+
+| Aspect | Original | Cached (this repo) |
+|--------|----------|-------------------|
+| Docker image size | ~50+ GB | ~15 GB |
+| Cold start time | 10-20 minutes | 20-30 seconds |
+| Model location | Bundled in image | RunPod cache |
+| RunPod Model field | Not needed | **Required** |
+
+**IMPORTANT:** When deploying, you MUST set the Model field to: `tencent/Hunyuan3D-2.1`
 
 ## Key Fix
 
@@ -51,12 +64,15 @@ git push -u origin main
 3. Select **Import Git Repository**
 4. Choose your repository and branch (main)
 5. Dockerfile path: `Dockerfile` (or leave default if in root)
-6. Configure endpoint:
-   - **GPU:** 48GB+ (A40, A100-40GB, RTX A6000)
+6. **CRITICAL:** Set the **Model** field to: `tencent/Hunyuan3D-2.1`
+   - This enables RunPod's model caching feature
+   - Without this, the endpoint will fail to load the model
+7. Configure endpoint:
+   - **GPU:** 32-48GB (A40, A100-40GB, RTX A6000)
    - **Container Disk:** 50GB
    - **Idle Timeout:** 60s+
    - **Max Workers:** Based on budget
-7. Click **Deploy Endpoint**
+8. Click **Deploy Endpoint**
 
 ### 4. Monitor Build
 
@@ -191,9 +207,15 @@ Reduce texture settings:
 
 Or disable textures entirely: `"generate_texture": false`
 
-### Slow Cold Starts
+### Cold Starts
 
-The Docker image includes pre-downloaded model weights (~7GB). Cold starts typically take 30-60s for model loading. To reduce:
+This cached version has significantly faster cold starts (~20-30 seconds) compared to the original (~10-20 minutes) because:
+
+1. Model weights are pre-cached on RunPod host machines
+2. Docker image is smaller (~15GB vs ~50GB)
+3. No model download required at startup
+
+To further optimize:
 1. Keep Idle Timeout higher (60s+)
 2. Use Active Workers to maintain minimum warm workers
 3. Consider RunPod's FlashBoot feature

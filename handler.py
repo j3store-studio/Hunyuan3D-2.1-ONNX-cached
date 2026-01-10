@@ -1,7 +1,7 @@
 """
 RunPod Serverless Handler for Hunyuan3D-2.1 (Image-to-3D)
 
-Version: 1.1.0 - Fixed serverless entry point
+Version: 2.0.0 - Cached version (uses RunPod model caching)
 
 Generates high-fidelity 3D models with PBR materials from input images.
 
@@ -24,6 +24,68 @@ import base64
 import tempfile
 import traceback
 from pathlib import Path
+
+
+# =============================================================================
+# RunPod Model Caching Support
+# =============================================================================
+
+# Possible cache locations (in order of priority)
+CACHE_LOCATIONS = [
+    os.environ.get("HUGGINGFACE_HUB_CACHE"),
+    os.environ.get("HF_HOME"),
+    "/runpod-volume/huggingface-cache/hub",
+    "/runpod-volume/huggingface-cache",
+]
+
+
+def find_cached_model(model_name: str) -> str | None:
+    """
+    Find a model in RunPod's cache directory.
+
+    Checks multiple possible cache locations:
+    1. HUGGINGFACE_HUB_CACHE environment variable
+    2. HF_HOME environment variable
+    3. /runpod-volume/huggingface-cache/hub (RunPod default with /hub)
+    4. /runpod-volume/huggingface-cache (RunPod default without /hub)
+
+    When deploying with the Model field set in RunPod console,
+    models are pre-cached at: {cache_root}/models--{org}--{name}/snapshots/{hash}/
+    """
+    cache_name = model_name.replace("/", "--")
+
+    for cache_dir in CACHE_LOCATIONS:
+        if not cache_dir:
+            continue
+
+        # Check both with and without /hub suffix
+        dirs_to_check = [cache_dir]
+        if not cache_dir.endswith("/hub"):
+            dirs_to_check.append(os.path.join(cache_dir, "hub"))
+
+        for base_dir in dirs_to_check:
+            snapshots_dir = os.path.join(base_dir, f"models--{cache_name}", "snapshots")
+            if os.path.exists(snapshots_dir):
+                snapshots = os.listdir(snapshots_dir)
+                if snapshots:
+                    cached_path = os.path.join(snapshots_dir, snapshots[0])
+                    print(f"Found cached model at: {cached_path}")
+                    return cached_path
+
+    print(f"WARNING: No cached model found for {model_name}")
+    print(f"Checked locations: {[loc for loc in CACHE_LOCATIONS if loc]}")
+    return None
+
+
+# Model directory: prefer cached, fallback to bundled or env var
+MODEL_DIR = find_cached_model("tencent/Hunyuan3D-2.1") or os.environ.get("MODEL_DIR", "/models/Hunyuan3D-2.1")
+print(f"Using model directory: {MODEL_DIR}")
+
+# Verify model directory exists (fail early if neither cache nor fallback exists)
+if not os.path.exists(MODEL_DIR):
+    print(f"ERROR: Model directory does not exist: {MODEL_DIR}")
+    print("Make sure to set the Model field to 'tencent/Hunyuan3D-2.1' in RunPod console")
+    print("This enables RunPod's model caching feature.")
 
 # Add Hunyuan3D paths
 sys.path.insert(0, '/app')
@@ -58,7 +120,7 @@ def load_pipelines():
         try:
             from hy3dshape.pipelines import Hunyuan3DDiTFlowMatchingPipeline
             shape_pipeline = Hunyuan3DDiTFlowMatchingPipeline.from_pretrained(
-                '/models/Hunyuan3D-2.1',
+                MODEL_DIR,
                 device=device
             )
             print("Shape pipeline loaded successfully.")
@@ -72,7 +134,7 @@ def load_pipelines():
         try:
             from hy3dpaint.textureGenPipeline import Hunyuan3DPaintPipeline, Hunyuan3DPaintConfig
             config = Hunyuan3DPaintConfig(
-                model_path='/models/Hunyuan3D-2.1',
+                model_path=MODEL_DIR,
                 max_num_view=int(os.environ.get('MAX_NUM_VIEW', 6)),
                 resolution=int(os.environ.get('TEXTURE_RESOLUTION', 512)),
                 device=str(device)

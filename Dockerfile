@@ -1,6 +1,10 @@
-# Dockerfile for Hunyuan3D-2.1 on RunPod Serverless
+# Dockerfile for Hunyuan3D-2.1-ONNX-cached on RunPod Serverless
+# CACHED VERSION - Uses RunPod model caching for faster cold starts
+#
 # Image-to-3D generation with PBR materials
 # Requires ~29GB VRAM (A40, A100, RTX A6000)
+#
+# DEPLOYMENT: Set Model field to "tencent/Hunyuan3D-2.1" in RunPod console
 #
 # KEY FIX: Uses Python 3.12 + locally-built custom_rasterizer wheel
 # (HuggingFace wheel has ABI mismatch with all PyTorch 2.3-2.5 versions)
@@ -152,17 +156,28 @@ RUN pip install --no-cache-dir runpod huggingface_hub[cli]
 RUN python -c "import runpod; print(f'runpod {runpod.__version__}')"
 
 # =============================================================================
-# STAGE 8: Download model weights (large but faster cold starts)
+# STAGE 8: Model weights (CACHED version - model loaded from RunPod cache)
+# =============================================================================
+# NOTE: This is the CACHED version of Hunyuan3D-2.1-ONNX.
+# Model weights are NOT bundled in the Docker image.
+# Instead, they are pre-loaded from RunPod's model cache at runtime.
+#
+# IMPORTANT: When deploying, set the Model field to: tencent/Hunyuan3D-2.1
+# This enables RunPod to pre-cache the model on host machines.
+#
+# Cache location: /runpod-volume/huggingface-cache/hub/models--tencent--Hunyuan3D-2.1/
 # =============================================================================
 WORKDIR /app
 RUN mkdir -p /models
 
-# Download Hunyuan3D-2.1 weights
-RUN python -c "from huggingface_hub import snapshot_download; snapshot_download('tencent/Hunyuan3D-2.1', local_dir='/models/Hunyuan3D-2.1')"
+# Model download REMOVED for cached version
+# The handler's find_cached_model() function will locate the model at runtime
+# RUN python -c "from huggingface_hub import snapshot_download; snapshot_download('tencent/Hunyuan3D-2.1', local_dir='/models/Hunyuan3D-2.1')"
 
-# VERIFY: Model files exist
-RUN test -d /models/Hunyuan3D-2.1 || (echo "ERROR: Model not downloaded" && exit 1)
-RUN ls -la /models/Hunyuan3D-2.1/
+# Skip model verification (model will be in cache, not in /models/)
+# RUN test -d /models/Hunyuan3D-2.1 || (echo "ERROR: Model not downloaded" && exit 1)
+# RUN ls -la /models/Hunyuan3D-2.1/
+RUN echo "Model will be loaded from RunPod cache at runtime"
 
 # ONNX-based RealESRGAN upscaler (replaces basicsr/realesrgan packages)
 COPY onnx_upscaler.py /app/onnx_upscaler.py
@@ -223,8 +238,10 @@ print('Paint pipeline import: OK')" || echo "WARN: Paint pipeline import failed 
 # =============================================================================
 # FINAL: Environment and entrypoint
 # =============================================================================
-ENV HF_HOME=/models
-ENV HUGGINGFACE_HUB_CACHE=/models
+# NOTE: HF_HOME and HUGGINGFACE_HUB_CACHE are intentionally NOT set here
+# for the cached version. The handler's find_cached_model() function will
+# automatically discover the RunPod cache location at runtime.
+# Setting these to /models would conflict with RunPod's model caching.
 ENV MAX_NUM_VIEW=6
 ENV TEXTURE_RESOLUTION=512
 
@@ -235,12 +252,13 @@ CMD ["python", "-u", "handler.py"]
 # BUILD SUMMARY (printed at end of build)
 # =============================================================================
 RUN echo "=============================================" && \
-    echo "BUILD COMPLETE - Summary:" && \
+    echo "BUILD COMPLETE - CACHED VERSION" && \
     echo "=============================================" && \
     python --version && \
     python -c "import torch; print(f'PyTorch: {torch.__version__}')" && \
     python -c "import custom_rasterizer; print('custom_rasterizer: installed')" && \
     python -c "import runpod; print(f'runpod: {runpod.__version__}')" && \
-    echo "Model path: /models/Hunyuan3D-2.1" && \
-    du -sh /models/Hunyuan3D-2.1 && \
+    echo "" && \
+    echo "IMPORTANT: Deploy with Model field set to: tencent/Hunyuan3D-2.1" && \
+    echo "Model will be loaded from RunPod cache at runtime" && \
     echo "============================================="
