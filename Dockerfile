@@ -84,24 +84,22 @@ RUN test -d /app/hy3dpaint || (echo "ERROR: hy3dpaint not found" && exit 1)
 RUN test -f /app/requirements.txt || (echo "ERROR: requirements.txt not found" && exit 1)
 
 # =============================================================================
-# STAGE 4a: Install Blender for bpy support
+# STAGE 4a: Install bpy (Blender Python module) via pip
 # =============================================================================
-# Use official Blender tarball - PPA has broken dependencies on Ubuntu 22.04
+# Install system dependencies required by bpy
 RUN apt-get update && apt-get install -y --no-install-recommends \
     libxi6 libxxf86vm1 libxfixes3 libxrender1 libgl1 \
-    libxkbcommon0 libsm6 libice6 \
+    libxkbcommon0 libsm6 libice6 libxrandr2 libxcursor1 \
+    libxinerama1 libglew2.2 libwayland-client0 libwayland-cursor0 \
+    libwayland-egl1 libxkbcommon0 libdbus-1-3 libpulse0 \
     && rm -rf /var/lib/apt/lists/*
 
-# Download and extract Blender 4.0 LTS
-RUN wget -q https://download.blender.org/release/Blender4.0/blender-4.0.2-linux-x64.tar.xz -O /tmp/blender.tar.xz && \
-    tar -xf /tmp/blender.tar.xz -C /opt && \
-    rm /tmp/blender.tar.xz && \
-    ln -s /opt/blender-4.0.2-linux-x64 /opt/blender
+# Install bpy via pip (Blender as a Python module)
+# This provides bpy without needing standalone Blender installation
+RUN pip install --no-cache-dir bpy==4.0.0
 
-# Add Blender's Python modules to path
-ENV BLENDER_PATH=/opt/blender
-ENV PYTHONPATH="${BLENDER_PATH}/4.0/scripts/modules${PYTHONPATH:+:$PYTHONPATH}"
-ENV PATH="${BLENDER_PATH}:${PATH}"
+# VERIFY: bpy can be imported
+RUN python -c "import bpy; print(f'bpy {bpy.app.version_string}')" || echo "WARN: bpy import failed - mesh export may not work"
 
 # =============================================================================
 # STAGE 4b: Python dependencies (inference-optimized)
