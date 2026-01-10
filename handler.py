@@ -1,6 +1,8 @@
 """
 RunPod Serverless Handler for Hunyuan3D-2.1 (Image-to-3D)
 
+Version: 1.1.0 - Fixed serverless entry point
+
 Generates high-fidelity 3D models with PBR materials from input images.
 
 API:
@@ -199,10 +201,9 @@ def handler(job: dict) -> dict:
         }
 
 
-# For local testing
+# Entry point
 if __name__ == "__main__":
-    # Test with a sample image
-    import sys
+    # Local testing: python handler.py <image.png>
     if len(sys.argv) > 1:
         with open(sys.argv[1], "rb") as f:
             test_image = base64.b64encode(f.read()).decode("utf-8")
@@ -219,12 +220,9 @@ if __name__ == "__main__":
             print(f"Error: {result['error']}")
         else:
             print(f"Success! Format: {result['format']}, Textured: {result['textured']}")
-            # Save output for inspection
             with open("test_output.glb", "wb") as f:
                 f.write(base64.b64decode(result['model']))
             print("Saved to test_output.glb")
     else:
-        print("Usage: python handler.py <input_image.png>")
-else:
-    # Start RunPod serverless handler
-    runpod.serverless.start({"handler": handler})
+        # Production: RunPod serverless mode
+        runpod.serverless.start({"handler": handler})
