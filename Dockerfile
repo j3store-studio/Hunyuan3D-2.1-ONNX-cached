@@ -170,6 +170,10 @@ COPY weights/realesrgan_x4plus.onnx /app/weights/realesrgan_x4plus.onnx
 # =============================================================================
 COPY handler.py /app/handler.py
 
+# FIX: Replace schedulers.py to fix numpy/torch compatibility issue
+# (torch.from_numpy fails with "expected np.ndarray got numpy.ndarray")
+COPY schedulers.py /app/hy3dshape/hy3dshape/schedulers.py
+
 # VERIFY: Handler file exists and has correct syntax
 RUN python -m py_compile /app/handler.py && echo "handler.py: syntax OK"
 
