@@ -103,9 +103,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 # Create bpy virtual environment with Python 3.10
+# NOTE: bpy 4.0.0 doesn't exist - first available version is 4.2.0
 RUN python3.10 -m venv /opt/bpy-env && \
     /opt/bpy-env/bin/pip install --no-cache-dir --upgrade pip && \
-    /opt/bpy-env/bin/pip install --no-cache-dir bpy==4.0.0 numpy==1.24.3
+    /opt/bpy-env/bin/pip install --no-cache-dir "bpy>=4.2.0" numpy==1.24.3
 
 # VERIFY: bpy works in the venv
 RUN /opt/bpy-env/bin/python -c "import bpy; print(f'bpy {bpy.app.version_string}')"
