@@ -1,5 +1,17 @@
 {
-  "tests": [],
+  "tests": [
+    {
+      "name": "basic_3d_generation",
+      "input": {
+        "image_base64": "TEST_IMAGE_BASE64_HERE",
+        "generate_texture": false,
+        "output_format": "glb",
+        "num_views": 4,
+        "texture_resolution": 256
+      },
+      "timeout": 600000
+    }
+  ],
   "config": {
     "gpuTypeId": "NVIDIA RTX A6000",
     "gpuCount": 1,
