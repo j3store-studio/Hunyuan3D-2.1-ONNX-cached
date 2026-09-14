@@ -14,15 +14,34 @@ assert torch.__version__.startswith("2.5.1"), torch.__version__
 assert np.__version__ == "1.26.4", np.__version__
 torch.from_numpy(np.zeros(3, dtype=np.float32))
 
+import accelerate
 import custom_rasterizer
+import onnxruntime
+import pymeshlab
+import rembg
+import runpod
+import skimage
+import timm
+import xatlas
+from DifferentiableRenderer.MeshRender import MeshRender
 from DifferentiableRenderer.mesh_inpaint_processor import meshVerticeInpaint
 from DifferentiableRenderer.mesh_utils import load_mesh, save_mesh
+from hunyuanpaintpbr.pipeline import HunyuanPaintPipeline
+from hunyuanpaintpbr.unet.modules import Dino_v2, UNet2p5DConditionModel
+from hy3dshape.models.autoencoders import ShapeVAE
+from hy3dshape.models.conditioner import SingleImageEncoder
+from hy3dshape.models.denoisers.hunyuandit import HunYuanDiTPlain
 from hy3dshape.pipelines import Hunyuan3DDiTFlowMatchingPipeline
 from hy3dshape.postprocessors import FaceReducer
+from hy3dshape.preprocessors import ImageProcessorV2
 from hy3dshape.rembg import BackgroundRemover
+from hy3dshape.schedulers import FlowMatchEulerDiscreteScheduler
 from textureGenPipeline import Hunyuan3DPaintConfig, Hunyuan3DPaintPipeline
 from transformers import AutoImageProcessor
 from utils.image_super_utils import load_rrdbnet
+from utils.multiview_utils import multiviewDiffusionNet
+from utils.pipeline_utils import ViewProcessor
+from utils.simplify_mesh_utils import remesh_mesh
 from utils.uvwrap_utils import mesh_uv_wrap
 
 import handler
