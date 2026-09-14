@@ -1,276 +1,74 @@
-# Dockerfile for Hunyuan3D-2.1-ONNX-cached on RunPod Serverless
-# CACHED VERSION - Uses RunPod model caching for faster cold starts
-#
-# Image-to-3D generation with PBR materials
-# Requires ~29GB VRAM (A40, A100, RTX A6000)
-#
-# DEPLOYMENT: Set Model field to "tencent/Hunyuan3D-2.1" in RunPod console
-#
-# KEY FIX: Uses Python 3.12 + locally-built custom_rasterizer wheel
-# (HuggingFace wheel has ABI mismatch with all PyTorch 2.3-2.5 versions)
-
 FROM nvidia/cuda:12.4.0-devel-ubuntu22.04
 
-ENV DEBIAN_FRONTEND=noninteractive
-ENV PYTHONUNBUFFERED=1
-ENV CUDA_HOME=/usr/local/cuda
-ENV TORCH_CUDA_ARCH_LIST="7.0;7.5;8.0;8.6;8.9;9.0"
-ENV FORCE_CUDA=1
-ENV MAX_JOBS=4
+ENV DEBIAN_FRONTEND=noninteractive \
+    PYTHONUNBUFFERED=1 \
+    CUDA_HOME=/usr/local/cuda \
+    HF_HUB_DISABLE_TELEMETRY=1 \
+    U2NET_HOME=/models/u2net \
+    DINO_DIR=/models/dinov2-giant \
+    HY3D_COMMIT=82920d643c0dc2f7bfd7255f45f62d386edfe60c
 
-# =============================================================================
-# STAGE 1: System dependencies
-# =============================================================================
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    git \
-    git-lfs \
-    wget \
-    curl \
-    ffmpeg \
-    libsm6 \
-    libxext6 \
-    libgl1-mesa-glx \
-    libglib2.0-0 \
-    libxrender1 \
-    libgomp1 \
-    build-essential \
-    gcc \
-    g++ \
-    ninja-build \
-    software-properties-common \
-    && add-apt-repository ppa:deadsnakes/ppa -y \
-    && add-apt-repository ppa:ubuntu-toolchain-r/test -y \
+        git wget curl ca-certificates ffmpeg \
+        libsm6 libxext6 libxrender1 libgl1 libgl1-mesa-glx libglib2.0-0 libgomp1 \
+        build-essential gcc g++ ninja-build software-properties-common \
+    && add-apt-repository -y ppa:deadsnakes/ppa \
+    && add-apt-repository -y ppa:ubuntu-toolchain-r/test \
     && apt-get update \
-    && apt-get install -y --no-install-recommends python3.12 python3.12-dev python3.12-venv \
-    && apt-get install -y --no-install-recommends libstdc++6 \
+    && apt-get install -y --no-install-recommends python3.12 python3.12-dev python3.12-venv libstdc++6 \
     && rm -rf /var/lib/apt/lists/*
 
-# Set Python 3.12 as default (MUST match locally-built wheel: cp312)
-RUN update-alternatives --install /usr/bin/python python /usr/bin/python3.12 1 && \
-    update-alternatives --install /usr/bin/python3 python3 /usr/bin/python3.12 1
+RUN update-alternatives --install /usr/bin/python python /usr/bin/python3.12 1 \
+    && update-alternatives --install /usr/bin/python3 python3 /usr/bin/python3.12 1 \
+    && curl -sS https://bootstrap.pypa.io/get-pip.py | python3.12 \
+    && python -m pip install --no-cache-dir --upgrade pip setuptools wheel ninja pybind11
 
-# Install pip for Python 3.12
-RUN curl -sS https://bootstrap.pypa.io/get-pip.py | python3.12
-
-# VERIFY: Python version
-RUN python --version | grep "3.12" || (echo "ERROR: Python 3.12 required" && exit 1)
-
-# =============================================================================
-# STAGE 2: PyTorch (must be installed BEFORE any CUDA extensions)
-# =============================================================================
-RUN pip install --no-cache-dir --upgrade pip setuptools wheel ninja pybind11
-
-# Note: cu124 has known issues with PyTorch 2.5.x, using cu121 instead
-# The CUDA runtime is bundled with PyTorch, so this works with cuda:12.4 base image
-# Install PyTorch packages separately to avoid resolution issues
 RUN pip install --no-cache-dir torch==2.5.1 --index-url https://download.pytorch.org/whl/cu121
 RUN pip install --no-cache-dir torchvision==0.20.1 --index-url https://download.pytorch.org/whl/cu121
 RUN pip install --no-cache-dir torchaudio==2.5.1 --index-url https://download.pytorch.org/whl/cu121
 
-# VERIFY: PyTorch installed with CUDA
-RUN python -c "import torch; print(f'PyTorch {torch.__version__}'); print(f'CUDA available: {torch.cuda.is_available()}'); assert torch.__version__.startswith('2.5'), 'Wrong PyTorch version'"
+ENV LD_LIBRARY_PATH=/usr/local/lib/python3.12/dist-packages/torch/lib:${LD_LIBRARY_PATH}
 
-# Add PyTorch libs to LD_LIBRARY_PATH for CUDA extensions (custom_rasterizer needs libc10.so)
-ENV LD_LIBRARY_PATH="/usr/local/lib/python3.12/dist-packages/torch/lib:${LD_LIBRARY_PATH}"
+RUN git clone https://github.com/Tencent-Hunyuan/Hunyuan3D-2.1.git /app \
+    && git -C /app checkout ${HY3D_COMMIT} \
+    && rm -rf /app/.git
 
-# =============================================================================
-# STAGE 3: Clone Hunyuan3D-2.1 source
-# =============================================================================
-WORKDIR /app
-
-RUN git clone https://github.com/Tencent-Hunyuan/Hunyuan3D-2.1.git . && \
-    git lfs install && \
-    git lfs pull
-
-# VERIFY: Key directories exist
-RUN test -d /app/hy3dshape || (echo "ERROR: hy3dshape not found" && exit 1)
-RUN test -d /app/hy3dpaint || (echo "ERROR: hy3dpaint not found" && exit 1)
-RUN test -f /app/requirements.txt || (echo "ERROR: requirements.txt not found" && exit 1)
-
-# =============================================================================
-# STAGE 4a: Install Python 3.11 + bpy in separate venv
-# =============================================================================
-# bpy 4.2.0+ requires Python 3.11+ (not 3.10, not 3.12)
-# We use Python 3.11 in a separate venv and call it via subprocess for mesh operations
-#
-# NOTE: We add deadsnakes PPA manually because add-apt-repository breaks after
-# changing the default Python to 3.12 (apt_pkg is only available for system Python)
-
-# Add deadsnakes PPA manually (avoids add-apt-repository which needs apt_pkg)
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    gnupg ca-certificates \
-    && echo "deb https://ppa.launchpadcontent.net/deadsnakes/ppa/ubuntu jammy main" > /etc/apt/sources.list.d/deadsnakes.list \
-    && apt-key adv --keyserver keyserver.ubuntu.com --recv-keys F23C5A6CF475977595C89F51BA6932366A755776 \
-    && apt-get update \
-    && apt-get install -y --no-install-recommends \
-    python3.11 python3.11-venv python3.11-dev \
-    libxi6 libxxf86vm1 libxfixes3 libxrender1 libgl1 \
-    libxkbcommon0 libsm6 libice6 libxrandr2 libxcursor1 \
-    libxinerama1 libglew2.2 libwayland-client0 libwayland-cursor0 \
-    libwayland-egl1 libdbus-1-3 \
-    && rm -rf /var/lib/apt/lists/*
-
-# Create bpy virtual environment with Python 3.11
-# NOTE: bpy wheels are hosted on Blender's index, not standard PyPI
-# bpy 4.x+ requires Python 3.11 (no 3.12 wheels exist)
-RUN python3.11 -m venv /opt/bpy-env && \
-    /opt/bpy-env/bin/pip install --no-cache-dir --upgrade pip && \
-    /opt/bpy-env/bin/pip install --no-cache-dir \
-        --extra-index-url https://download.blender.org/pypi/ \
-        "bpy>=4.2.0" numpy==1.24.3
-
-# VERIFY: bpy works in the venv
-RUN /opt/bpy-env/bin/python -c "import bpy; print(f'bpy {bpy.app.version_string}')"
-
-# =============================================================================
-# STAGE 4b: Python dependencies (inference-optimized)
-# =============================================================================
-# Use our trimmed requirements_inference.txt instead of full requirements.txt
-# Excludes: pytorch-lightning, deepspeed, tensorboard, gradio, bpy
-# This reduces image size significantly for serverless inference
 COPY requirements_inference.txt /tmp/requirements_inference.txt
-RUN pip install --no-cache-dir --ignore-installed -r /tmp/requirements_inference.txt
+RUN pip uninstall -y numpy \
+    && pip install --no-cache-dir -r /tmp/requirements_inference.txt \
+    && python -c "import numpy, torch; assert numpy.__version__ == '1.26.4', numpy.__version__; torch.from_numpy(numpy.zeros(3)); assert torch.__version__.startswith('2.5.1'), torch.__version__"
 
-# VERIFY: Key packages installed
-RUN python -c "import transformers; print(f'transformers {transformers.__version__}')"
-RUN python -c "import diffusers; print(f'diffusers {diffusers.__version__}')"
-RUN python -c "import trimesh; print(f'trimesh {trimesh.__version__}')"
-
-# Re-verify PyTorch wasn't overwritten
-RUN python -c "import torch; assert torch.__version__.startswith('2.5'), f'PyTorch was overwritten to {torch.__version__}'"
-
-# =============================================================================
-# STAGE 5: Custom rasterizer (locally-built wheel for PyTorch 2.5.1+cu121, Python 3.12)
-# =============================================================================
-# HuggingFace wheel has ABI mismatch - using locally-built wheel instead
 COPY custom_rasterizer-0.1-cp312-cp312-linux_x86_64.whl /tmp/
-RUN pip install --no-cache-dir /tmp/custom_rasterizer-0.1-cp312-cp312-linux_x86_64.whl && \
-    rm /tmp/custom_rasterizer-0.1-cp312-cp312-linux_x86_64.whl
+RUN pip install --no-cache-dir /tmp/custom_rasterizer-0.1-cp312-cp312-linux_x86_64.whl \
+    && rm /tmp/custom_rasterizer-0.1-cp312-cp312-linux_x86_64.whl
 
-# VERIFY: custom_rasterizer works
-RUN python -c "import custom_rasterizer; print('custom_rasterizer: OK')"
+RUN pip install --no-cache-dir runpod
 
-# =============================================================================
-# STAGE 6: Optional mesh_inpaint_processor (pure C++, no CUDA)
-# =============================================================================
 WORKDIR /app/hy3dpaint/DifferentiableRenderer
-RUN pip install --no-cache-dir -e . 2>&1 || echo "WARN: mesh_inpaint_processor build failed (optional)"
+RUN c++ -O3 -Wall -shared -std=c++11 -fPIC $(python -m pybind11 --includes) mesh_inpaint_processor.cpp \
+        -o mesh_inpaint_processor$(python -c "import sysconfig; print(sysconfig.get_config_var('EXT_SUFFIX'))")
 
-# Check if it installed (optional, so don't fail)
-RUN python -c "from mesh_inpaint_processor import meshVerticeInpaint; print('mesh_inpaint_processor: OK')" || echo "mesh_inpaint_processor: NOT INSTALLED (optional)"
-
-# =============================================================================
-# STAGE 7: RunPod SDK
-# =============================================================================
-RUN pip install --no-cache-dir runpod huggingface_hub[cli]
-
-# VERIFY: RunPod SDK
-RUN python -c "import runpod; print(f'runpod {runpod.__version__}')"
-
-# =============================================================================
-# STAGE 8: Model weights (CACHED version - model loaded from RunPod cache)
-# =============================================================================
-# NOTE: This is the CACHED version of Hunyuan3D-2.1-ONNX.
-# Model weights are NOT bundled in the Docker image.
-# Instead, they are pre-loaded from RunPod's model cache at runtime.
-#
-# IMPORTANT: When deploying, set the Model field to: tencent/Hunyuan3D-2.1
-# This enables RunPod to pre-cache the model on host machines.
-#
-# Cache location: /runpod-volume/huggingface-cache/hub/models--tencent--Hunyuan3D-2.1/
-# =============================================================================
 WORKDIR /app
-RUN mkdir -p /models
+RUN mkdir -p /app/hy3dpaint/ckpt \
+    && wget -q -O /app/hy3dpaint/ckpt/RealESRGAN_x4plus.pth \
+        https://github.com/xinntao/Real-ESRGAN/releases/download/v0.1.0/RealESRGAN_x4plus.pth
 
-# Model download REMOVED for cached version
-# The handler's find_cached_model() function will locate the model at runtime
-# RUN python -c "from huggingface_hub import snapshot_download; snapshot_download('tencent/Hunyuan3D-2.1', local_dir='/models/Hunyuan3D-2.1')"
+RUN python -c "from huggingface_hub import snapshot_download; snapshot_download('facebook/dinov2-giant', local_dir='/models/dinov2-giant', allow_patterns=['config.json', 'preprocessor_config.json', 'model.safetensors'])"
 
-# Skip model verification (model will be in cache, not in /models/)
-# RUN test -d /models/Hunyuan3D-2.1 || (echo "ERROR: Model not downloaded" && exit 1)
-# RUN ls -la /models/Hunyuan3D-2.1/
-RUN echo "Model will be loaded from RunPod cache at runtime"
+RUN python -c "from rembg import new_session; new_session('u2net')"
 
-# ONNX-based RealESRGAN upscaler (replaces basicsr/realesrgan packages)
-COPY onnx_upscaler.py /app/onnx_upscaler.py
-COPY weights/realesrgan_x4plus.onnx /app/weights/realesrgan_x4plus.onnx
-
-# =============================================================================
-# STAGE 9: Copy handler and final verification
-# =============================================================================
+COPY schedulers.py /app/hy3dshape/hy3dshape/schedulers.py
+COPY patches/mesh_utils.py /app/hy3dpaint/DifferentiableRenderer/mesh_utils.py
+COPY patches/image_super_utils.py /app/hy3dpaint/utils/image_super_utils.py
+COPY patches/build_check.py /app/build_check.py
 COPY handler.py /app/handler.py
 
-# FIX: Replace schedulers.py to fix numpy/torch compatibility issue
-# (torch.from_numpy fails with "expected np.ndarray got numpy.ndarray")
-COPY schedulers.py /app/hy3dshape/hy3dshape/schedulers.py
+RUN python /app/build_check.py
 
-# FIX: Replace mesh_utils.py with subprocess wrapper (calls bpy via Python 3.10)
-COPY mesh_utils_noblender.py /app/hy3dpaint/DifferentiableRenderer/mesh_utils.py
+ENV TEXTURE_SIZE=2048 \
+    PREVIEW_TEXTURE_SIZE=1024 \
+    MAX_FACES=40000 \
+    MAX_NUM_VIEW=6 \
+    VIEW_RESOLUTION=512
 
-# Copy bpy wrapper script (runs in /opt/bpy-env)
-COPY bpy_mesh_ops.py /app/bpy_mesh_ops.py
-
-# VERIFY: bpy wrapper can be called via subprocess
-RUN /opt/bpy-env/bin/python /app/bpy_mesh_ops.py --help && echo "bpy_mesh_ops.py: OK"
-
-# VERIFY: Handler file exists and has correct syntax
-RUN python -m py_compile /app/handler.py && echo "handler.py: syntax OK"
-
-# VERIFY: ONNX upscaler can be imported
-RUN python -c "from onnx_upscaler import upscale_image; print('ONNX upscaler: OK')"
-
-# VERIFY: All imports in handler work
-RUN python -c "\
-import sys; \
-sys.path.insert(0, '/app'); \
-sys.path.insert(0, '/app/hy3dshape'); \
-sys.path.insert(0, '/app/hy3dpaint'); \
-import runpod; \
-import torch; \
-import base64; \
-import tempfile; \
-print('Handler imports: OK')"
-
-# VERIFY: Shape pipeline can be imported (don't load weights, just import)
-RUN python -c "\
-import sys; \
-sys.path.insert(0, '/app'); \
-sys.path.insert(0, '/app/hy3dshape'); \
-from hy3dshape.pipelines import Hunyuan3DDiTFlowMatchingPipeline; \
-print('Shape pipeline import: OK')"
-
-# VERIFY: Paint pipeline can be imported
-RUN python -c "\
-import sys; \
-sys.path.insert(0, '/app'); \
-sys.path.insert(0, '/app/hy3dpaint'); \
-from hy3dpaint.textureGenPipeline import Hunyuan3DPaintPipeline, Hunyuan3DPaintConfig; \
-print('Paint pipeline import: OK')" || echo "WARN: Paint pipeline import failed - check at runtime"
-
-# =============================================================================
-# FINAL: Environment and entrypoint
-# =============================================================================
-# NOTE: HF_HOME and HUGGINGFACE_HUB_CACHE are intentionally NOT set here
-# for the cached version. The handler's find_cached_model() function will
-# automatically discover the RunPod cache location at runtime.
-# Setting these to /models would conflict with RunPod's model caching.
-ENV MAX_NUM_VIEW=6
-ENV TEXTURE_RESOLUTION=512
-
-WORKDIR /app
-CMD ["python", "-u", "handler.py"]
-
-# =============================================================================
-# BUILD SUMMARY (printed at end of build)
-# =============================================================================
-RUN echo "=============================================" && \
-    echo "BUILD COMPLETE - CACHED VERSION" && \
-    echo "=============================================" && \
-    python --version && \
-    python -c "import torch; print(f'PyTorch: {torch.__version__}')" && \
-    python -c "import custom_rasterizer; print('custom_rasterizer: installed')" && \
-    python -c "import runpod; print(f'runpod: {runpod.__version__}')" && \
-    echo "" && \
-    echo "IMPORTANT: Deploy with Model field set to: tencent/Hunyuan3D-2.1" && \
-    echo "Model will be loaded from RunPod cache at runtime" && \
-    echo "============================================="
+CMD ["python", "-u", "/app/handler.py"]
