@@ -298,6 +298,28 @@ def prepare_subject(image, mode):
     return STATE["rembg"](image.convert("RGB")).convert("RGBA"), True
 
 
+def load_mesh_from_url(url):
+    import trimesh
+
+    if not str(url).startswith(("https://", "http://")):
+        raise JobError("bad_input", "mesh_url must be http or https")
+    try:
+        request = urllib.request.Request(url, headers={"User-Agent": "sudair-gen3d"})
+        with urllib.request.urlopen(request, timeout=120) as response:
+            data = response.read(64 * 1024 * 1024 + 1)
+    except Exception as exc:
+        raise JobError("bad_input", f"could not download mesh: {exc}")
+    if len(data) > 64 * 1024 * 1024 or data[:4] != b"glTF":
+        raise JobError("bad_input", "mesh_url is not a valid glb")
+    try:
+        mesh = trimesh.load(io.BytesIO(data), file_type="glb", force="mesh")
+    except Exception as exc:
+        raise JobError("bad_input", f"could not read mesh: {exc}")
+    if mesh is None or len(mesh.faces) == 0:
+        raise JobError("bad_input", "mesh has no faces")
+    return mesh
+
+
 def generate_shape(subject, params):
     import torch
 
@@ -400,13 +422,22 @@ def sha256_of(path):
     return digest.hexdigest()
 
 
+UPLOAD_UA = "sudair-gen3d/1.0 (+https://props.sudair.top)"
+
+
 def upload_file(url, name, path):
     with open(path, "rb") as f:
         data = f.read()
     content_type = CONTENT_TYPES.get(os.path.splitext(name)[1], "application/octet-stream")
     last_error = None
     for attempt in range(4):
-        request = urllib.request.Request(url, data=data, method="PUT", headers={"Content-Type": content_type})
+        method = "POST" if attempt % 2 else "PUT"
+        request = urllib.request.Request(
+            url,
+            data=data,
+            method=method,
+            headers={"Content-Type": content_type, "User-Agent": UPLOAD_UA, "Accept": "application/json", "X-Gen3d-Upload": name},
+        )
         try:
             with urllib.request.urlopen(request, timeout=300) as response:
                 if 200 <= response.status < 300:
@@ -417,15 +448,39 @@ def upload_file(url, name, path):
                         "sha256": hashlib.sha256(data).hexdigest(),
                         "content_type": content_type,
                     }
-                last_error = f"HTTP {response.status}"
+                last_error = f"HTTP {response.status} ({method})"
         except urllib.error.HTTPError as exc:
-            last_error = f"HTTP {exc.code}"
-            if exc.code < 500 and exc.code != 429:
+            last_error = f"HTTP {exc.code} ({method})"
+            if exc.code < 500 and exc.code not in (403, 408, 429):
                 break
         except Exception as exc:
             last_error = str(exc)
-        time.sleep(2 * (attempt + 1))
+        time.sleep(1.5 * (attempt + 1))
     raise JobError("upload_failed", f"{name}: {last_error}")
+
+
+def inline_fallback(files, failed):
+    order = ["manifest.json", "preview.glb", "shape.glb", "model.glb", "textures/albedo.jpg"]
+    results = []
+    total = 0
+    for name in order:
+        path = files.get(name)
+        if not path or name not in failed:
+            continue
+        size = os.path.getsize(path)
+        if total + size > MAX_BASE64_BYTES:
+            continue
+        with open(path, "rb") as f:
+            results.append(
+                {
+                    "name": name,
+                    "b64": base64.b64encode(f.read()).decode("ascii"),
+                    "bytes": size,
+                    "content_type": CONTENT_TYPES.get(os.path.splitext(name)[1], "application/octet-stream"),
+                }
+            )
+        total += size
+    return results
 
 
 def run_job(job, inp, work):
@@ -443,9 +498,14 @@ def run_job(job, inp, work):
         raise JobError("empty_subject", "no object was found in the image")
     timings["image"] = round(time.time() - step, 2)
 
-    progress(job, "shape")
     step = time.time()
-    mesh = generate_shape(subject, params)
+    if inp.get("mesh_url"):
+        progress(job, "mesh")
+        mesh = load_mesh_from_url(inp["mesh_url"])
+        timings["mesh"] = round(time.time() - step, 2)
+    else:
+        progress(job, "shape")
+        mesh = generate_shape(subject, params)
     shape_obj = os.path.join(work, "white_mesh.obj")
     shape_glb = os.path.join(work, "shape.glb")
     mesh.export(shape_obj)
@@ -500,10 +560,23 @@ def run_job(job, inp, work):
     if put_urls:
         progress(job, "upload")
         step = time.time()
+        failed = {}
         for name, path in files.items():
-            if name in put_urls:
+            if name not in put_urls:
+                continue
+            try:
                 results.append(upload_file(put_urls[name], name, path))
+            except JobError as exc:
+                failed[name] = str(exc)
+                print(f"upload failed for {name}: {exc}", flush=True)
         timings["upload"] = round(time.time() - step, 2)
+        if failed:
+            inline = inline_fallback(files, failed)
+            names = {item["name"] for item in inline}
+            if "preview.glb" not in names or "manifest.json" not in names:
+                raise JobError("upload_failed", "; ".join(list(failed.values())[:3]))
+            results.extend(inline)
+            stats["upload_fallback"] = "; ".join(list(failed.values())[:3])
 
     if return_base64:
         path = files["preview.glb"]
