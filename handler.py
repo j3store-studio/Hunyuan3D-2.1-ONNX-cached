@@ -45,6 +45,7 @@ STATE = {
     "face_reducer": None,
     "error": None,
     "load_seconds": None,
+    "selftest": None,
 }
 
 
@@ -52,6 +53,13 @@ class JobError(Exception):
     def __init__(self, code, message):
         super().__init__(message)
         self.code = code
+
+
+def describe_exception(exc):
+    frames = traceback.extract_tb(exc.__traceback__)[-5:]
+    where = " <- ".join(f"{os.path.basename(frame.filename)}:{frame.lineno} {frame.name}" for frame in reversed(frames))
+    message = " ".join(str(exc).split())[:600]
+    return f"{type(exc).__name__}: {message} @ {where}"
 
 
 def find_cached_model():
@@ -94,13 +102,38 @@ def resolve_model_dir():
     )
 
 
+def gpu_selftest():
+    import torch
+
+    if not torch.cuda.is_available():
+        raise RuntimeError("CUDA is not available on this worker")
+    report = {
+        "gpu": torch.cuda.get_device_name(0),
+        "capability": ".".join(str(v) for v in torch.cuda.get_device_capability(0)),
+        "torch_arch_list": torch.cuda.get_arch_list(),
+    }
+    matrix = torch.randn(64, 64, device="cuda")
+    report["torch_matmul"] = round(float((matrix @ matrix).abs().mean().item()), 4)
+
+    import custom_rasterizer
+
+    pos = torch.tensor(
+        [[[-0.8, -0.8, 0.5, 1.0], [0.8, -0.8, 0.5, 1.0], [0.0, 0.8, 0.5, 1.0]]],
+        dtype=torch.float32,
+        device="cuda",
+    )
+    tri = torch.tensor([[0, 1, 2]], dtype=torch.int32, device="cuda")
+    findices, _ = custom_rasterizer.rasterize(pos, tri, (32, 32))
+    torch.cuda.synchronize()
+    report["rasterizer_pixels"] = int((findices > 0).sum().item())
+    return report
+
+
 def load_models():
     started = time.time()
     import torch
     import huggingface_hub
 
-    if not torch.cuda.is_available():
-        raise RuntimeError("CUDA is not available on this worker")
     model_dir = resolve_model_dir()
     if not model_dir:
         raise RuntimeError("cached model not found, set the endpoint Model field to tencent/Hunyuan3D-2.1")
@@ -446,6 +479,7 @@ def run_job(job, inp, work):
         "texture_size": TEXTURE_SIZE if params["texture"] else None,
         "background_removed": background_removed,
         "gpu_load_seconds": STATE["load_seconds"],
+        "gpu": (STATE["selftest"] or {}).get("gpu"),
     }
 
     manifest_path = os.path.join(work, "manifest.json")
@@ -500,6 +534,7 @@ def health():
         "model_dir": STATE["model_dir"],
         "cuda": cuda,
         "gpu": torch.cuda.get_device_name(0) if cuda else None,
+        "selftest": STATE["selftest"],
         "load_seconds": STATE["load_seconds"],
     }
 
@@ -530,7 +565,7 @@ def handler(job):
         return {"error": f"{exc.code}: {exc}"}
     except Exception as exc:
         traceback.print_exc()
-        text = f"{type(exc).__name__}: {exc}"
+        text = describe_exception(exc)
         result = {"error": f"internal: {text}"}
         if "CUDA" in text or "out of memory" in text.lower():
             result["refresh_worker"] = True
@@ -540,11 +575,16 @@ def handler(job):
 
 
 def boot():
+    stage = "gpu self-test"
     try:
+        STATE["selftest"] = gpu_selftest()
+        print(f"gpu self-test: {STATE['selftest']}", flush=True)
+        stage = "model loading"
         load_models()
     except Exception as exc:
         traceback.print_exc()
-        STATE["error"] = f"{type(exc).__name__}: {exc}"
+        STATE["error"] = f"{stage} failed: {describe_exception(exc)}"
+        print(STATE["error"], flush=True)
 
 
 if __name__ == "__main__":

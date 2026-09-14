@@ -5,6 +5,9 @@ ENV DEBIAN_FRONTEND=noninteractive \
     PIP_DISABLE_PIP_VERSION_CHECK=1 \
     PIP_DEFAULT_TIMEOUT=60 \
     CUDA_HOME=/usr/local/cuda \
+    TORCH_CUDA_ARCH_LIST="8.0;8.6;8.9;9.0" \
+    FORCE_CUDA=1 \
+    MAX_JOBS=4 \
     HF_HUB_DISABLE_TELEMETRY=1 \
     U2NET_HOME=/models/u2net \
     DINO_DIR=/models/dinov2-giant \
@@ -38,9 +41,11 @@ RUN pip uninstall -y numpy \
     && pip install --no-cache-dir --prefer-binary -r /tmp/requirements_worker.txt \
     && python -c "import numpy, torch; assert numpy.__version__ == '1.26.4', numpy.__version__; torch.from_numpy(numpy.zeros(3)); assert torch.__version__.startswith('2.5.1'), torch.__version__"
 
-COPY custom_rasterizer-0.1-cp312-cp312-linux_x86_64.whl /tmp/
-RUN pip install --no-cache-dir --no-deps /tmp/custom_rasterizer-0.1-cp312-cp312-linux_x86_64.whl \
-    && rm /tmp/custom_rasterizer-0.1-cp312-cp312-linux_x86_64.whl
+RUN pip install --no-cache-dir "setuptools==75.8.0" ninja \
+    && cd /app/hy3dpaint/custom_rasterizer \
+    && pip install --no-cache-dir --no-build-isolation . \
+    && cd / \
+    && python -c "import torch, custom_rasterizer, custom_rasterizer_kernel; print('custom_rasterizer built from source:', custom_rasterizer_kernel.__file__)"
 
 WORKDIR /app/hy3dpaint/DifferentiableRenderer
 RUN c++ -O3 -Wall -shared -std=c++17 -fPIC $(python -m pybind11 --includes) mesh_inpaint_processor.cpp \
