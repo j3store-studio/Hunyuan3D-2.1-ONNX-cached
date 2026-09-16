@@ -58,12 +58,13 @@ RUN mkdir -p /app/hy3dpaint/ckpt \
 
 RUN python -c "from huggingface_hub import snapshot_download; snapshot_download('facebook/dinov2-giant', local_dir='/models/dinov2-giant', allow_patterns=['config.json', 'preprocessor_config.json', 'model.safetensors'])"
 
-RUN python -c "from rembg import new_session; new_session('u2net')"
+RUN python -c "from rembg import new_session; new_session('u2net'); new_session('isnet-general-use')"
 
 COPY schedulers.py /app/hy3dshape/hy3dshape/schedulers.py
 COPY patches/mesh_utils.py /app/hy3dpaint/DifferentiableRenderer/mesh_utils.py
 COPY patches/image_super_utils.py /app/hy3dpaint/utils/image_super_utils.py
 COPY patches/hunyuanpaintpbr_init.py /app/hy3dpaint/hunyuanpaintpbr/__init__.py
+COPY patches/quality.py /app/quality.py
 COPY patches/build_check.py /app/build_check.py
 COPY handler.py /app/handler.py
 
@@ -71,8 +72,8 @@ RUN python /app/build_check.py
 
 ENV TEXTURE_SIZE=2048 \
     PREVIEW_TEXTURE_SIZE=1024 \
-    MAX_FACES=40000 \
-    MAX_NUM_VIEW=6 \
+    FACE_CAP=200000 \
+    MAX_NUM_VIEW=9 \
     VIEW_RESOLUTION=512
 
 CMD ["python", "-u", "/app/handler.py"]

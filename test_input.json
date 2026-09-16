@@ -2,8 +2,8 @@
   "input": {
     "image_url": "https://raw.githubusercontent.com/Tencent-Hunyuan/Hunyuan3D-2.1/82920d643c0dc2f7bfd7255f45f62d386edfe60c/assets/demo.png",
     "texture": true,
+    "quality": "high",
     "seed": 1234,
-    "max_faces": 40000,
     "return_base64": true
   }
 }

@@ -57,8 +57,49 @@ def dino():
 
 def background_remover():
     from hy3dshape.rembg import BackgroundRemover
+    from rembg import new_session
 
     BackgroundRemover()
+    new_session("isnet-general-use")
+
+
+def quality_module():
+    import numpy as np
+    import trimesh
+    from PIL import Image
+
+    import quality
+
+    name, preset = quality.preset_for("ultra")
+    assert name == "ultra" and preset["octree_resolution"] == 512, preset
+    assert quality.preset_for("high")[1]["view_resolution"] == 768
+    assert quality.preset_for("unknown")[0] == "balanced"
+    view = Image.new("RGB", (256, 256), (255, 255, 255))
+    view.paste((40, 40, 40), (64, 32, 192, 224))
+    reference = Image.new("RGBA", (200, 300), (0, 0, 0, 0))
+    reference.paste((200, 30, 30, 255), (20, 10, 180, 290))
+    merged, info = quality.align_reference(reference, view, "auto")
+    assert merged is not None and info["applied"], info
+    pixel = np.asarray(merged)[128, 128]
+    assert int(pixel[0]) > int(pixel[1]) + 40, pixel
+    skipped, info = quality.align_reference(reference.rotate(90, expand=True), view, "auto")
+    assert skipped is None and not info["applied"], info
+    work = tempfile.mkdtemp()
+    source = os.path.join(work, "white_mesh.obj")
+    target = os.path.join(work, "white_mesh_remesh.obj")
+    sphere = trimesh.creation.icosphere(subdivisions=5)
+    sphere.export(source)
+    quality.reset_job(paint_faces=5000)
+    try:
+        quality.remesh_keep_detail(source, target)
+    finally:
+        quality.reset_job()
+    reduced = trimesh.load(target, force="mesh")
+    assert 0 < len(reduced.faces) <= 5000, len(reduced.faces)
+    floater = trimesh.creation.icosphere(subdivisions=0)
+    floater.apply_translation([5.0, 0.0, 0.0])
+    cleaned, info = quality.clean_mesh(trimesh.util.concatenate([sphere, floater]), 8000)
+    assert info["floaters_removed"] == 20 and 0 < len(cleaned.faces) <= 8000, info
 
 
 def glb_export():
@@ -133,13 +174,16 @@ for module, attr in [
     ("hy3dshape.postprocessors", "FaceReducer"),
     ("hy3dshape.pipelines", "Hunyuan3DDiTFlowMatchingPipeline"),
     ("hy3dshape.rembg", "BackgroundRemover"),
+    ("quality", "install"),
     ("handler", "build_textured_glb"),
+    ("handler", "parse_params"),
 ]:
     check(f"{module}.{attr}", symbol(module, attr))
 
 check("RealESRGAN weights load", realesrgan)
 check("dinov2-giant files", dino)
-check("rembg u2net session", background_remover)
+check("rembg sessions", background_remover)
+check("quality presets and reference alignment", quality_module)
 check("textured GLB export", glb_export)
 
 print("=" * 60, flush=True)

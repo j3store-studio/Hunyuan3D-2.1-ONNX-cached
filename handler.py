@@ -25,14 +25,22 @@ REALESRGAN_PATH = f"{APP_DIR}/hy3dpaint/ckpt/RealESRGAN_x4plus.pth"
 ALLOW_MODEL_DOWNLOAD = os.environ.get("ALLOW_MODEL_DOWNLOAD", "0") == "1"
 TEXTURE_SIZE = int(os.environ.get("TEXTURE_SIZE", "2048"))
 PREVIEW_TEXTURE_SIZE = int(os.environ.get("PREVIEW_TEXTURE_SIZE", "1024"))
-DEFAULT_MAX_FACES = int(os.environ.get("MAX_FACES", "40000"))
-DEFAULT_VIEWS = int(os.environ.get("MAX_NUM_VIEW", "6"))
+DEFAULT_MAX_FACES = int(os.environ.get("MAX_FACES", "0"))
+DEFAULT_VIEWS = int(os.environ.get("MAX_NUM_VIEW", "9"))
 DEFAULT_VIEW_RESOLUTION = int(os.environ.get("VIEW_RESOLUTION", "512"))
-FACE_CAP = 40000
+FACE_CAP = int(os.environ.get("FACE_CAP", "200000"))
+BACKGROUND_MODELS = {"isnet": "isnet-general-use", "u2net": None}
 MAX_IMAGE_BYTES = 20 * 1024 * 1024
 MAX_IMAGE_SIDE = 2048
 MAX_BASE64_BYTES = 8 * 1024 * 1024
-CONTENT_TYPES = {".glb": "model/gltf-binary", ".jpg": "image/jpeg", ".png": "image/png", ".json": "application/json"}
+CONTENT_TYPES = {
+    ".glb": "model/gltf-binary",
+    ".jpg": "image/jpeg",
+    ".png": "image/png",
+    ".json": "application/json",
+    ".obj": "text/plain",
+    ".mtl": "text/plain",
+}
 
 if not ALLOW_MODEL_DOWNLOAD:
     os.environ.setdefault("HF_HUB_OFFLINE", "1")
@@ -42,6 +50,7 @@ STATE = {
     "shape": None,
     "paint": None,
     "rembg": None,
+    "rembg_sessions": {},
     "face_reducer": None,
     "error": None,
     "load_seconds": None,
@@ -153,6 +162,7 @@ def load_models():
     from hy3dshape.postprocessors import FaceReducer
     from hy3dshape.rembg import BackgroundRemover
     from textureGenPipeline import Hunyuan3DPaintConfig, Hunyuan3DPaintPipeline
+    import quality
 
     shape = Hunyuan3DDiTFlowMatchingPipeline.from_pretrained(
         model_dir,
@@ -168,18 +178,33 @@ def load_models():
     config.dino_ckpt_path = DINO_DIR
     config.realesrgan_ckpt_path = REALESRGAN_PATH
     config.texture_size = TEXTURE_SIZE * 2
-    paint = Hunyuan3DPaintPipeline(config)
+    paint = quality.install(Hunyuan3DPaintPipeline(config))
+
+    sessions = {}
+    try:
+        from rembg import new_session
+
+        for key, name in BACKGROUND_MODELS.items():
+            if not name:
+                continue
+            try:
+                sessions[key] = new_session(name)
+            except Exception as exc:
+                print(f"background model {name} unavailable: {exc}", flush=True)
+    except Exception as exc:
+        print(f"rembg sessions unavailable: {exc}", flush=True)
 
     STATE.update(
         model_dir=model_dir,
         shape=shape,
         paint=paint,
         rembg=BackgroundRemover(),
+        rembg_sessions=sessions,
         face_reducer=FaceReducer(),
         error=None,
         load_seconds=round(time.time() - started, 1),
     )
-    print(f"models loaded from {model_dir} in {STATE['load_seconds']}s", flush=True)
+    print(f"models loaded from {model_dir} in {STATE['load_seconds']}s, background models {sorted(sessions)}", flush=True)
 
 
 def progress(job, message):
@@ -215,7 +240,17 @@ def as_bool(value, default):
     return str(value).strip().lower() in ("1", "true", "yes", "on")
 
 
+def first_present(inp, *keys):
+    for key in keys:
+        if key in inp and inp[key] is not None and inp[key] != "":
+            return inp[key]
+    return None
+
+
 def parse_params(inp):
+    import quality
+
+    quality_name, preset = quality.preset_for(inp.get("quality"))
     background = str(inp.get("remove_background", "auto")).strip().lower()
     if background in ("1", "true", "yes"):
         background = "always"
@@ -223,17 +258,37 @@ def parse_params(inp):
         background = "never"
     elif background not in ("auto", "always", "never"):
         background = "auto"
-    view_resolution = clamp_int(inp.get("view_resolution"), DEFAULT_VIEW_RESOLUTION, 512, 768)
+    view_resolution = clamp_int(first_present(inp, "view_resolution", "texture_resolution"), preset["view_resolution"], 512, 768)
+    projection = str(first_present(inp, "reference_projection") or preset["reference_projection"]).strip().lower()
+    if projection in ("1", "true", "yes", "on"):
+        projection = "always"
+    elif projection in ("0", "false", "no", "off"):
+        projection = "never"
+    elif projection not in ("auto", "always", "never"):
+        projection = "auto"
+    background_model = str(first_present(inp, "background_model") or preset["background_model"]).strip().lower()
+    if background_model not in BACKGROUND_MODELS:
+        background_model = preset["background_model"]
+    output_format = str(inp.get("output_format", "glb")).strip().lower() or "glb"
     return {
-        "texture": as_bool(inp.get("texture", inp.get("generate_texture")), True),
+        "quality": quality_name,
+        "texture": as_bool(first_present(inp, "texture", "generate_texture"), True),
         "seed": clamp_int(inp.get("seed"), random.randint(0, 2**31 - 1), 0, 2**31 - 1),
-        "steps": clamp_int(inp.get("steps"), 50, 5, 100),
+        "steps": clamp_int(inp.get("steps"), preset["steps"], 5, 100),
         "guidance_scale": clamp_float(inp.get("guidance_scale"), 5.0, 1.0, 15.0),
-        "octree_resolution": clamp_int(inp.get("octree_resolution"), 256, 128, 512),
-        "max_faces": clamp_int(inp.get("max_faces"), min(DEFAULT_MAX_FACES, FACE_CAP), 1000, FACE_CAP),
-        "views": clamp_int(inp.get("views"), DEFAULT_VIEWS, 6, 9),
+        "octree_resolution": clamp_int(inp.get("octree_resolution"), preset["octree_resolution"], 128, 512),
+        "max_faces": clamp_int(inp.get("max_faces"), min(DEFAULT_MAX_FACES or preset["max_faces"], FACE_CAP), 1000, FACE_CAP),
+        "views": clamp_int(first_present(inp, "views", "num_views"), preset["views"], 6, 9),
         "view_resolution": 768 if view_resolution >= 768 else 512,
+        "multiview_steps": clamp_int(inp.get("multiview_steps"), preset["multiview_steps"], 10, 50),
+        "multiview_guidance": clamp_float(inp.get("multiview_guidance"), preset["multiview_guidance"], 1.0, 8.0),
+        "full_texture": as_bool(inp.get("full_texture"), preset["full_texture"]),
+        "jpeg_quality": clamp_int(inp.get("jpeg_quality"), preset["jpeg_quality"], 70, 100),
+        "reference_projection": projection,
+        "background_model": background_model,
         "remove_background": background,
+        "clean_mesh": as_bool(inp.get("clean_mesh"), True),
+        "output_format": "glb" if output_format not in ("glb", "obj") else output_format,
     }
 
 
@@ -287,7 +342,16 @@ def load_input_image(inp):
     return image
 
 
-def prepare_subject(image, mode):
+def remove_background(image, model):
+    session = (STATE.get("rembg_sessions") or {}).get(model)
+    if session is not None:
+        from rembg import remove
+
+        return remove(image.convert("RGB"), session=session, bgcolor=[255, 255, 255, 0]).convert("RGBA")
+    return STATE["rembg"](image.convert("RGB")).convert("RGBA")
+
+
+def prepare_subject(image, mode, model="isnet"):
     has_alpha = image.mode in ("RGBA", "LA") or (image.mode == "P" and "transparency" in image.info)
     if has_alpha and mode != "always":
         rgba = image.convert("RGBA")
@@ -295,7 +359,7 @@ def prepare_subject(image, mode):
             return rgba, False
     if mode == "never":
         return image.convert("RGBA"), False
-    return STATE["rembg"](image.convert("RGB")).convert("RGBA"), True
+    return remove_background(image, model), True
 
 
 def load_mesh_from_url(url):
@@ -336,21 +400,66 @@ def generate_shape(subject, params):
     mesh = meshes[0] if meshes else None
     if mesh is None or len(mesh.faces) == 0:
         raise JobError("shape_failed", "could not extract a surface from this image")
-    return STATE["face_reducer"](mesh, max_facenum=params["max_faces"])
+    raw_faces = int(len(mesh.faces))
+    try:
+        import quality
+
+        cleaned, info = quality.clean_mesh(mesh, params["max_faces"], params["clean_mesh"])
+        if len(cleaned.faces) == 0:
+            raise ValueError("cleanup removed every face")
+        mesh = cleaned
+        params["floaters_removed"] = info["floaters_removed"]
+    except Exception as exc:
+        print(f"mesh cleanup fallback: {exc}", flush=True)
+        if len(mesh.faces) > params["max_faces"]:
+            mesh = STATE["face_reducer"](mesh, max_facenum=params["max_faces"])
+    params["raw_faces"] = raw_faces
+    return mesh
 
 
 def generate_texture(shape_obj, subject, params, work):
+    import quality
+
     paint = STATE["paint"]
-    paint.config.max_selected_view_num = params["views"]
-    paint.config.resolution = params["view_resolution"]
     output_obj = os.path.join(work, "textured_mesh.obj")
-    paint(mesh_path=shape_obj, image_path=subject, output_mesh_path=output_obj, save_glb=False)
+    attempts = [(params["views"], params["view_resolution"])]
+    if params["views"] > 6 or params["view_resolution"] > 512:
+        attempts.append((6, 512))
+    projection = None
+    for index, (views, resolution) in enumerate(attempts):
+        paint.config.max_selected_view_num = views
+        paint.config.resolution = resolution
+        quality.reset_job(
+            steps=params["multiview_steps"],
+            guidance=params["multiview_guidance"],
+            seed=params["seed"],
+            paint_faces=params["max_faces"],
+            reference=subject if params["reference_projection"] != "never" else None,
+            reference_mode=params["reference_projection"],
+            downsample=not params["full_texture"],
+        )
+        try:
+            paint(mesh_path=shape_obj, image_path=subject, output_mesh_path=output_obj, save_glb=False)
+        except RuntimeError as exc:
+            if index + 1 < len(attempts) and "out of memory" in str(exc).lower():
+                print(f"texture stage out of memory at {views} views / {resolution}px, retrying at 6 views / 512px", flush=True)
+                params["texture_fallback"] = "oom"
+                release_gpu_memory()
+                continue
+            raise
+        finally:
+            projection = quality.SETTINGS.get("reference_result")
+            quality.SETTINGS["reference"] = None
+        params["views"] = views
+        params["view_resolution"] = resolution
+        break
     base = output_obj[:-4]
     textures = {
         "obj": output_obj,
         "albedo": base + ".jpg",
         "metallic": base + "_metallic.jpg",
         "roughness": base + "_roughness.jpg",
+        "projection": projection,
     }
     if not os.path.exists(output_obj) or not os.path.exists(textures["albedo"]):
         raise JobError("texture_failed", "texture pipeline did not produce a textured mesh")
@@ -387,7 +496,7 @@ def metallic_roughness_image(metallic_path, roughness_path):
     return Image.fromarray(packed, "RGB")
 
 
-def build_textured_glb(textures, out_path, max_side=None):
+def build_textured_glb(textures, out_path, max_side=None, jpeg_quality=92):
     import trimesh
     from PIL import Image
 
@@ -397,11 +506,11 @@ def build_textured_glb(textures, out_path, max_side=None):
         raise JobError("export_failed", "textured mesh has no uv coordinates")
     material_args = {
         "name": "sudair_pbr",
-        "baseColorTexture": encode_jpeg(Image.open(textures["albedo"]), max_side),
+        "baseColorTexture": encode_jpeg(Image.open(textures["albedo"]), max_side, jpeg_quality),
     }
     if os.path.exists(textures.get("metallic", "")) and os.path.exists(textures.get("roughness", "")):
         material_args["metallicRoughnessTexture"] = encode_jpeg(
-            metallic_roughness_image(textures["metallic"], textures["roughness"]), max_side
+            metallic_roughness_image(textures["metallic"], textures["roughness"]), max_side, jpeg_quality
         )
         material_args["metallicFactor"] = 1.0
         material_args["roughnessFactor"] = 1.0
@@ -493,7 +602,7 @@ def run_job(job, inp, work):
     progress(job, "image")
     step = time.time()
     image = load_input_image(inp)
-    subject, background_removed = prepare_subject(image, params["remove_background"])
+    subject, background_removed = prepare_subject(image, params["remove_background"], params["background_model"])
     if subject.getchannel("A").getbbox() is None:
         raise JobError("empty_subject", "no object was found in the image")
     timings["image"] = round(time.time() - step, 2)
@@ -521,23 +630,44 @@ def run_job(job, inp, work):
 
         progress(job, "export")
         step = time.time()
-        files["model.glb"] = build_textured_glb(textures, os.path.join(work, "model.glb"))
-        files["preview.glb"] = build_textured_glb(textures, os.path.join(work, "preview.glb"), PREVIEW_TEXTURE_SIZE)
+        files["model.glb"] = build_textured_glb(textures, os.path.join(work, "model.glb"), None, params["jpeg_quality"])
+        files["preview.glb"] = build_textured_glb(textures, os.path.join(work, "preview.glb"), PREVIEW_TEXTURE_SIZE, 88)
         files["textures/albedo.jpg"] = textures["albedo"]
         for key in ("metallic", "roughness"):
             if os.path.exists(textures[key]):
                 files[f"textures/{key}.jpg"] = textures[key]
+        if params["output_format"] == "obj":
+            for path in sorted(glob.glob(os.path.join(work, "textured_mesh*"))):
+                files["obj/" + os.path.basename(path)] = path
         timings["export"] = round(time.time() - step, 2)
     else:
         files["model.glb"] = shape_glb
         files["preview.glb"] = shape_glb
 
+    texture_size = None
+    if params["texture"]:
+        try:
+            from PIL import Image
+
+            with Image.open(textures["albedo"]) as albedo_image:
+                texture_size = int(max(albedo_image.size))
+        except Exception:
+            texture_size = TEXTURE_SIZE
     stats = {
         "faces": int(len(mesh.faces)),
         "vertices": int(len(mesh.vertices)),
+        "raw_faces": params.get("raw_faces"),
+        "floaters_removed": params.get("floaters_removed"),
         "textured": params["texture"],
-        "texture_size": TEXTURE_SIZE if params["texture"] else None,
+        "texture_size": texture_size,
+        "quality": params["quality"],
+        "views": params["views"] if params["texture"] else None,
+        "view_resolution": params["view_resolution"] if params["texture"] else None,
+        "multiview_steps": params["multiview_steps"] if params["texture"] else None,
+        "reference_projection": textures.get("projection") if params["texture"] else None,
+        "texture_fallback": params.get("texture_fallback"),
         "background_removed": background_removed,
+        "background_model": params["background_model"] if background_removed else None,
         "gpu_load_seconds": STATE["load_seconds"],
         "gpu": (STATE["selftest"] or {}).get("gpu"),
     }
